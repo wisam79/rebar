@@ -1,7 +1,12 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Alert } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission } from 'react-native-vision-camera';
+import { View, Text, StyleSheet, ActivityIndicator, Alert } from 'react-native';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraPermission,
+} from 'react-native-vision-camera';
 import { useTensorflowModel } from 'react-native-fast-tflite';
+import { useRebarDetector } from '../hooks/useRebarDetector';
 import { Colors } from '../constants/theme';
 
 export default function CameraScreen() {
@@ -11,15 +16,17 @@ export default function CameraScreen() {
   const [cameraReady, setCameraReady] = useState(false);
   const [permissionGranted, setPermissionGranted] = useState(false);
 
-  // Load the TFLite model
-  // The model is bundled via metro.config.js from assets/model.tflite
-  const model = useTensorflowModel(require('../../assets/model.tflite'));
+  // Load the TFLite model — returns a TensorflowPlugin
+  const plugin = useTensorflowModel(require('../../assets/model.tflite'));
+
+  // Initialize the detector hook with the plugin
+  const { frameProcessor, detections, count, fps } =
+    useRebarDetector(plugin);
 
   useEffect(() => {
     if (hasPermission) {
       setPermissionGranted(true);
     } else {
-      // Request permission on mount
       requestPermission().then((granted) => {
         setPermissionGranted(granted);
         if (!granted) {
@@ -57,14 +64,12 @@ export default function CameraScreen() {
   }
 
   // --- Model Loading State ---
-  const modelState = model.state;
+  const modelState = plugin.state;
   if (modelState !== 'loaded') {
     return (
       <View style={styles.container}>
         <ActivityIndicator size="large" color={Colors.accent} />
-        <Text style={styles.status}>
-          Loading model… ({modelState})
-        </Text>
+        <Text style={styles.status}>Loading model… ({modelState})</Text>
       </View>
     );
   }
@@ -77,15 +82,30 @@ export default function CameraScreen() {
         device={device}
         isActive={true}
         onStarted={handleCameraReady}
+        frameProcessor={frameProcessor}
+        pixelFormat="rgb"
       />
-      {cameraReady ? (
-        <View style={styles.readyOverlay}>
-          <Text style={styles.readyText}>Camera Ready</Text>
-          <Text style={styles.readyText}>Model Loaded ✓</Text>
+
+      {/* Live HUD Overlay */}
+      <View style={styles.hudContainer}>
+        <View style={styles.hudCard}>
+          <Text style={styles.hudLabel}>DETECTED</Text>
+          <Text style={styles.hudCount}>{count}</Text>
+          <Text style={styles.hudLabel}>REBARS</Text>
         </View>
-      ) : (
-        <ActivityIndicator size="large" color={Colors.accent} style={styles.loader} />
-      )}
+        {cameraReady && (
+          <View style={styles.hudSecondary}>
+            <Text style={styles.hudFpsText}>{fps} FPS</Text>
+          </View>
+        )}
+        {!cameraReady && (
+          <ActivityIndicator
+            size="small"
+            color={Colors.accent}
+            style={styles.loader}
+          />
+        )}
+      </View>
     </View>
   );
 }
@@ -94,8 +114,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: Colors.background,
-    justifyContent: 'center',
-    alignItems: 'center',
   },
   status: {
     color: Colors.textSecondary,
@@ -108,20 +126,47 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     padding: 20,
   },
-  loader: {
-    position: 'absolute',
+  hudContainer: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  readyOverlay: {
-    position: 'absolute',
-    bottom: 100,
-    backgroundColor: Colors.overlay,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
+  hudCard: {
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    paddingHorizontal: 40,
+    paddingVertical: 24,
+    borderRadius: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  hudLabel: {
+    color: Colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+  },
+  hudCount: {
+    color: Colors.accent,
+    fontSize: 72,
+    fontWeight: 'bold',
+    marginVertical: 4,
+  },
+  hudSecondary: {
+    marginTop: 16,
+    backgroundColor: 'rgba(30, 30, 30, 0.7)',
+    paddingHorizontal: 16,
+    paddingVertical: 6,
     borderRadius: 8,
   },
-  readyText: {
-    color: Colors.textPrimary,
-    fontSize: 14,
-    marginVertical: 2,
+  hudFpsText: {
+    color: Colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  loader: {
+    position: 'absolute',
+    bottom: 120,
   },
 });
