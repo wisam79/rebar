@@ -1,6 +1,3 @@
-// --- Pure mathematical NMS and detection utilities ---
-// All functions are worklet-compatible (no external dependencies)
-
 export interface BoundingBox {
   x1: number;
   y1: number;
@@ -14,9 +11,6 @@ export interface Detection {
   classId: number;
 }
 
-/**
- * Compute Intersection over Union between two bounding boxes.
- */
 export function computeIOU(a: BoundingBox, b: BoundingBox): number {
   const interX1 = Math.max(a.x1, b.x1);
   const interY1 = Math.max(a.y1, b.y1);
@@ -36,15 +30,6 @@ export function computeIOU(a: BoundingBox, b: BoundingBox): number {
   return interArea / unionArea;
 }
 
-/**
- * Non-Maximum Suppression.
- *
- * @param boxes  Array of bounding boxes (already scaled to pixel coords)
- * @param scores Array of confidence scores
- * @param classIds Array of class IDs
- * @param iouThreshold  Maximum IoU for overlap suppression
- * @returns Filtered Detection[]
- */
 export function nonMaxSuppression(
   boxes: BoundingBox[],
   scores: number[],
@@ -56,7 +41,6 @@ export function nonMaxSuppression(
     indices.push(i);
   }
 
-  // Sort indices by score descending
   indices.sort((a, b) => scores[b] - scores[a]);
 
   const selected: Detection[] = [];
@@ -73,7 +57,6 @@ export function nonMaxSuppression(
       classId: classIds[idx],
     });
 
-    // Suppress overlapping boxes
     for (let j = i + 1; j < indices.length; j++) {
       const jdx = indices[j];
       if (suppressed[jdx]) continue;
@@ -89,9 +72,6 @@ export function nonMaxSuppression(
   return selected;
 }
 
-/**
- * Scale detection coordinates from model input space (640x640) back to camera frame pixels.
- */
 export function scaleBoxesToFrame(
   detections: Detection[],
   frameWidth: number,
@@ -111,4 +91,30 @@ export function scaleBoxesToFrame(
     confidence: d.confidence,
     classId: d.classId,
   }));
+}
+
+export function resizeFrameToModel(
+  frameData: Uint8Array,
+  frameWidth: number,
+  frameHeight: number,
+  modelSize: number
+): Float32Array {
+  const channels = 3;
+  const output = new Float32Array(modelSize * modelSize * channels);
+  const scaleX = frameWidth / modelSize;
+  const scaleY = frameHeight / modelSize;
+
+  for (let y = 0; y < modelSize; y++) {
+    const srcY = Math.min(Math.floor(y * scaleY), frameHeight - 1);
+    for (let x = 0; x < modelSize; x++) {
+      const srcX = Math.min(Math.floor(x * scaleX), frameWidth - 1);
+      const srcIdx = (srcY * frameWidth + srcX) * channels;
+      const dstIdx = (y * modelSize + x) * channels;
+      output[dstIdx] = frameData[srcIdx] / 255.0;
+      output[dstIdx + 1] = frameData[srcIdx + 1] / 255.0;
+      output[dstIdx + 2] = frameData[srcIdx + 2] / 255.0;
+    }
+  }
+
+  return output;
 }

@@ -1,177 +1,219 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { getRecordCount, deleteAllRecords, createProject, deleteProject } from '../services/db';
+import { useAppContext } from '../context/AppContext';
+import Card from '../components/Card';
+import Badge from '../components/Badge';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  Alert,
-  ScrollView,
-} from 'react-native';
-import { getRecordCount, deleteAllRecords } from '../services/db';
-import { Colors } from '../constants/theme';
+  SlidersIcon, ShieldIcon, InfoIcon, TrashIcon, PlusIcon, FolderIcon, EditIcon,
+} from '../constants/icons';
 
 export default function SettingsScreen() {
+  const { settings, updateSetting, projects, refreshProjects } = useAppContext();
   const [recordCount, setRecordCount] = useState(0);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectLocation, setNewProjectLocation] = useState('');
+  const [showNewProject, setShowNewProject] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
 
-  const fetchCount = useCallback(async () => {
-    const c = await getRecordCount();
-    setRecordCount(c);
-  }, []);
+  const sliderRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+
+  const fetchCount = useCallback(async () => { setRecordCount(await getRecordCount()); }, []);
+  useEffect(() => { fetchCount(); }, [fetchCount]);
+
+  const handleSliderMove = useCallback((e: React.MouseEvent | MouseEvent) => {
+    if (!draggingRef.current || !sliderRef.current) return;
+    const rect = sliderRef.current.getBoundingClientRect();
+    const percent = Math.max(10, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+    updateSetting('confidenceThreshold', Math.round(percent) / 100);
+  }, [updateSetting]);
+
+  const handleSliderDown = useCallback((e: React.MouseEvent) => {
+    draggingRef.current = true;
+    handleSliderMove(e);
+  }, [handleSliderMove]);
 
   useEffect(() => {
-    fetchCount();
-  }, [fetchCount]);
+    const up = () => { draggingRef.current = false; };
+    const move = (e: MouseEvent) => { handleSliderMove(e); };
+    window.addEventListener('mouseup', up);
+    window.addEventListener('mousemove', move);
+    return () => { window.removeEventListener('mouseup', up); window.removeEventListener('mousemove', move); };
+  }, [handleSliderMove]);
 
-  const handleClearHistory = useCallback(() => {
-    Alert.alert(
-      'Clear All History',
-      `This will permanently delete all ${recordCount} saved records. This action cannot be undone.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Clear All',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await deleteAllRecords();
-              setRecordCount(0);
-              Alert.alert('Done', 'All records have been deleted.');
-            } catch (e) {
-              Alert.alert('Error', 'Failed to delete records.');
-            }
-          },
-        },
-      ]
-    );
-  }, [recordCount]);
+  const handleClearHistory = useCallback(async () => {
+    if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
+    try { await deleteAllRecords(); setRecordCount(0); setConfirmClear(false); } catch { console.error('Failed'); }
+  }, [confirmClear]);
+
+  const handleCreateProject = useCallback(async () => {
+    if (!newProjectName.trim()) return;
+    try {
+      await createProject(newProjectName.trim(), newProjectLocation.trim());
+      setNewProjectName(''); setNewProjectLocation(''); setShowNewProject(false);
+      refreshProjects();
+    } catch { console.error('Failed'); }
+  }, [newProjectName, newProjectLocation, refreshProjects]);
+
+  const handleDeleteProject = useCallback(async (id: number) => {
+    try {
+      await deleteProject(id); refreshProjects();
+      if (settings.selectedProjectId === id) updateSetting('selectedProjectId', null);
+    } catch { console.error('Failed'); }
+  }, [settings.selectedProjectId, updateSetting, refreshProjects]);
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-    >
-      {/* App Info Card */}
-      <View style={styles.card}>
-        <Text style={styles.appName}>Rebar Counter</Text>
-        <Text style={styles.appVersion}>Version 1.0.0</Text>
-        <Text style={styles.appDesc}>
-          Offline-first construction rebar counter using on-device ML inference.
-        </Text>
-      </View>
+    <div className="screen" style={{ padding: 16, paddingBottom: 48, display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Card>
+        <div className="card-header">
+          <SlidersIcon size={16} color="var(--accent)" />
+          <span className="card-title">Detection Settings</span>
+        </div>
+        <div className="setting-row">
+          <div style={{ flex: 1 }}>
+            <div className="setting-label">Confidence Threshold</div>
+            <div className="setting-desc">Minimum detection confidence ({Math.round(settings.confidenceThreshold * 100)}%)</div>
+          </div>
+          <span className="setting-value">{settings.confidenceThreshold.toFixed(2)}</span>
+        </div>
+        <div ref={sliderRef} onMouseDown={handleSliderDown} className="slider-track">
+          <div className="slider-fill" style={{ width: `${settings.confidenceThreshold * 100}%` }} />
+          <div className="slider-thumb" style={{ left: `${settings.confidenceThreshold * 100}%` }} />
+        </div>
+        <div className="divider" style={{ marginTop: 8, marginBottom: 8 }} />
+        <div className="setting-row">
+          <div style={{ flex: 1 }}>
+            <div className="setting-label">NMS IoU Threshold</div>
+            <div className="setting-desc">Overlap suppression ({settings.nmsIouThreshold.toFixed(2)})</div>
+          </div>
+          <span className="setting-value">{settings.nmsIouThreshold.toFixed(2)}</span>
+        </div>
+      </Card>
 
-      {/* Database Stats Card */}
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Database</Text>
-        <View style={styles.statRow}>
-          <Text style={styles.statLabel}>Saved Records</Text>
-          <Text style={styles.statValue}>{recordCount}</Text>
-        </View>
-        <View style={styles.divider} />
-        <Text style={styles.statDesc}>
-          All data is stored locally on device. No cloud sync.
-        </Text>
-      </View>
+      <Card>
+        <div className="card-header">
+          <EditIcon size={16} color="var(--accent)" />
+          <span className="card-title">Rebar Specifications</span>
+        </div>
+        <div className="setting-row">
+          <span className="setting-label">Diameter (mm)</span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'flex-end' }}>
+            {[8, 10, 12, 16, 20, 25, 32].map(d => (
+              <button key={d} onClick={() => updateSetting('rebarDiameter', d)}
+                className={`chip ${settings.rebarDiameter === d ? 'chip-active' : ''}`}
+                style={{ padding: '4px 10px', fontSize: 12, fontWeight: settings.rebarDiameter === d ? 700 : 500 }}>
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="divider" />
+        <div className="setting-row">
+          <span className="setting-label">Grade</span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {['B500A', 'B500B', 'B500C'].map(g => (
+              <button key={g} onClick={() => updateSetting('rebarGrade', g)}
+                className={`chip ${settings.rebarGrade === g ? 'chip-active' : ''}`}
+                style={{ padding: '4px 10px', fontSize: 12, fontWeight: settings.rebarGrade === g ? 700 : 500 }}>
+                {g}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
 
-      {/* Actions Card */}
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Actions</Text>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={handleClearHistory}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.actionBtnText}>Clear All History</Text>
-        </TouchableOpacity>
-      </View>
+      <Card>
+        <div className="card-header">
+          <ShieldIcon size={16} color="var(--accent)" />
+          <span className="card-title">Camera</span>
+        </div>
+        <div className="setting-row">
+          <div style={{ flex: 1 }}>
+            <div className="setting-label">Flash / Torch</div>
+            <div className="setting-desc">Enable camera flashlight</div>
+          </div>
+          <button
+            onClick={() => updateSetting('flashEnabled', !settings.flashEnabled)}
+            className="toggle-track"
+            style={{ background: settings.flashEnabled ? 'var(--accent)' : 'var(--surface-2)' }}
+          >
+            <div className="toggle-thumb" style={{
+              left: settings.flashEnabled ? 22 : 2,
+              background: settings.flashEnabled ? '#fff' : 'var(--text-3)',
+            }} />
+          </button>
+        </div>
+      </Card>
 
-      {/* ML Info Card */}
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>ML Inference</Text>
-        <Text style={styles.statDesc}>
-          Detection runs entirely on-device using a YOLO-based TFLite model.
-          No internet connection required. All frame processing happens locally
-          via react-native-fast-tflite.
-        </Text>
-      </View>
-    </ScrollView>
+      <Card>
+        <div className="card-header">
+          <FolderIcon size={16} color="var(--accent)" />
+          <span className="card-title">Projects</span>
+          <button onClick={() => setShowNewProject(!showNewProject)} style={{ padding: 4, background: 'none', border: 'none', cursor: 'pointer' }}>
+            <PlusIcon size={18} color="var(--accent)" />
+          </button>
+        </div>
+
+        {showNewProject && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14, padding: 14, background: 'var(--surface-2)', borderRadius: 12 }}>
+            <input type="text" placeholder="Project name" className="input-field" value={newProjectName} onChange={e => setNewProjectName(e.target.value)} />
+            <input type="text" placeholder="Location (optional)" className="input-field" value={newProjectLocation} onChange={e => setNewProjectLocation(e.target.value)} />
+            <button onClick={handleCreateProject} style={{
+              background: 'var(--accent)', color: '#fff', padding: '12px', borderRadius: 10,
+              border: 'none', cursor: 'pointer', fontSize: 15, fontWeight: 600,
+              transition: 'opacity 0.15s ease',
+            }}>
+              Create Project
+            </button>
+          </div>
+        )}
+
+        {projects.length === 0 && !showNewProject && (
+          <div style={{ fontSize: 14, color: 'var(--text-3)', textAlign: 'center', padding: '14px 0' }}>
+            No projects yet. Create one to organize your counts.
+          </div>
+        )}
+
+        {projects.map(p => (
+          <div key={p.id} className="project-row" style={{ paddingLeft: 0, paddingRight: 0 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-1)' }}>{p.name}</div>
+              {p.location && <div style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 1 }}>{p.location}</div>}
+              <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>{p.record_count} records</div>
+            </div>
+            <button onClick={() => handleDeleteProject(p.id!)} style={{ padding: 8, background: 'none', border: 'none', cursor: 'pointer' }}>
+              <TrashIcon size={16} color="var(--text-3)" />
+            </button>
+          </div>
+        ))}
+      </Card>
+
+      <Card>
+        <div className="card-header">
+          <InfoIcon size={16} color="var(--accent)" />
+          <span className="card-title">Data</span>
+        </div>
+        <div className="setting-row">
+          <span className="setting-label">Saved Records</span>
+          <Badge label={String(recordCount)} variant="accent" size="md" />
+        </div>
+        <div className="divider" />
+        <div className="setting-desc">All data is stored locally on device. No cloud sync. No data leaves your device.</div>
+        <button onClick={handleClearHistory} className="danger-btn" style={{ background: confirmClear ? 'var(--danger)' : undefined }}>
+          <TrashIcon size={16} color="var(--danger)" />
+          <span className="danger-btn-text">{confirmClear ? `Tap Again to Delete ${recordCount} Records` : 'Clear All History'}</span>
+        </button>
+      </Card>
+
+      <Card>
+        <div className="card-header">
+          <InfoIcon size={16} color="var(--accent)" />
+          <span className="card-title">About</span>
+        </div>
+        <div style={{ fontSize: 20, fontWeight: 800, color: 'var(--text-1)', marginBottom: 2 }}>Madani Rebar Counter</div>
+        <div style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, marginBottom: 8 }}>Version 2.0.0</div>
+        <div className="setting-desc">Professional on-device rebar detection and counting using YOLO-based ML inference. Works entirely offline. No internet required.</div>
+      </Card>
+    </div>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
-  content: {
-    padding: 16,
-    paddingBottom: 32,
-  },
-  card: {
-    backgroundColor: Colors.surface,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  appName: {
-    color: Colors.textPrimary,
-    fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
-  appVersion: {
-    color: Colors.accent,
-    fontSize: 13,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  appDesc: {
-    color: Colors.textSecondary,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  cardTitle: {
-    color: Colors.textPrimary,
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 12,
-  },
-  statRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  statLabel: {
-    color: Colors.textSecondary,
-    fontSize: 14,
-  },
-  statValue: {
-    color: Colors.accent,
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  divider: {
-    height: 1,
-    backgroundColor: Colors.border,
-    marginBottom: 8,
-  },
-  statDesc: {
-    color: Colors.textSecondary,
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  actionBtn: {
-    backgroundColor: Colors.danger,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  actionBtnText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-});

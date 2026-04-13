@@ -1,276 +1,202 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { DetectionRecord, ProjectStats } from '../services/db';
 import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  Alert,
-  RefreshControl,
-} from 'react-native';
-import type { Record } from '../services/db';
-import { getAllRecords, deleteRecord } from '../services/db';
-import { Colors } from '../constants/theme';
+  getAllRecords, deleteRecord, searchRecords, getProjectStats,
+  getRecordCount, getTotalRebarCount, getAverageCount, exportRecordsAsCSV,
+} from '../services/db';
+import Card from '../components/Card';
+import Badge from '../components/Badge';
+import {
+  SearchIcon, ExportIcon, TrashIcon, RebarIcon, ClockIcon, FolderIcon,
+} from '../constants/icons';
 
 function formatDate(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
-  } catch {
-    return iso;
-  }
+  try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); }
+  catch { return iso; }
 }
 
 function formatTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return '';
-  }
+  try { return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
+  catch { return ''; }
 }
 
-/**
- * Single record card in the history list.
- */
-const RecordCard = React.memo(function RecordCard({
-  record,
-  onDelete,
-}: {
-  record: Record;
-  onDelete: (id: number) => void;
-}) {
-  const handleDelete = useCallback(() => {
-    Alert.alert(
-      'Delete Record',
-      `Are you sure you want to delete the count of ${record.count_result} rebars?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => onDelete(record.id),
-        },
-      ]
-    );
-  }, [record, onDelete]);
-
+function RecordCard({ record, onDelete }: { record: DetectionRecord; onDelete: (id: number) => void }) {
   return (
-    <View style={styles.card}>
-      <View style={styles.cardLeft}>
-        <Text style={styles.cardCount}>{record.count_result}</Text>
-        <Text style={styles.cardLabel}>REBARS</Text>
-      </View>
-      <View style={styles.cardDivider} />
-      <View style={styles.cardRight}>
-        <Text style={styles.cardProject}>{record.project_name || '—'}</Text>
-        <Text style={styles.cardDate}>
-          {formatDate(record.timestamp)} · {formatTime(record.timestamp)}
-        </Text>
-        {record.notes ? (
-          <Text style={styles.cardNotes} numberOfLines={1}>
-            {record.notes}
-          </Text>
-        ) : null}
-      </View>
-      <TouchableOpacity
-        style={styles.deleteBtn}
-        onPress={handleDelete}
-        activeOpacity={0.6}
-      >
-        <Text style={styles.deleteBtnText}>🗑️</Text>
-      </TouchableOpacity>
-    </View>
+    <Card elevated style={{ padding: '14px 16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{
+          width: 52, height: 52, borderRadius: 14, flexShrink: 0,
+          background: 'var(--accent-light)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1,
+        }}>
+          <RebarIcon size={14} color="var(--accent)" />
+          <span style={{ fontSize: 20, fontWeight: 800, color: 'var(--accent)', letterSpacing: '-0.5px', lineHeight: 1 }}>{record.count_result}</span>
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+            <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {record.project_name || 'Unassigned'}
+            </span>
+            {record.rebar_diameter > 0 && <Badge label={`Ø${record.rebar_diameter}mm`} variant="accent" size="sm" />}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: record.notes ? 2 : 0 }}>
+            <ClockIcon size={11} color="var(--text-3)" />
+            <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{formatDate(record.timestamp)} · {formatTime(record.timestamp)}</span>
+          </div>
+          {record.notes && (
+            <span style={{ fontSize: 11, color: 'var(--text-2)', fontStyle: 'italic', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
+              {record.notes}
+            </span>
+          )}
+        </div>
+
+        <button onClick={() => onDelete(record.id!)} style={{
+          padding: 8, background: 'none', border: 'none', cursor: 'pointer',
+          borderRadius: 10, transition: 'background 0.15s ease',
+        }}>
+          <TrashIcon size={16} color="var(--text-3)" />
+        </button>
+      </div>
+    </Card>
   );
-});
+}
 
 export default function HistoryScreen() {
-  const [records, setRecords] = useState<Record[]>([]);
+  const [records, setRecords] = useState<DetectionRecord[]>([]);
   const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [isSearchActive, setIsSearchActive] = useState(false);
+  const [projectStats, setProjectStats] = useState<ProjectStats[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [totalRebars, setTotalRebars] = useState(0);
+  const [avgCount, setAvgCount] = useState(0);
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => setDebouncedQuery(searchQuery), 300);
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [searchQuery]);
 
   const fetchRecords = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await getAllRecords();
+      const data = debouncedQuery ? await searchRecords(debouncedQuery) : await getAllRecords();
       setRecords(data);
+      const [stats, c, t, a] = await Promise.all([getProjectStats(), getRecordCount(), getTotalRebarCount(), getAverageCount()]);
+      setProjectStats(stats); setTotalCount(c); setTotalRebars(t); setAvgCount(a);
     } catch (e) {
       console.error('Failed to fetch records:', e);
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
-  }, []);
+  }, [debouncedQuery]);
 
-  useEffect(() => {
-    fetchRecords();
-  }, [fetchRecords]);
+  useEffect(() => { fetchRecords(); }, [fetchRecords]);
 
   const handleDelete = useCallback(async (id: number) => {
     try {
       await deleteRecord(id);
-      setRecords((prev) => prev.filter((r) => r.id !== id));
-    } catch (e) {
-      console.error('Failed to delete record:', e);
-      Alert.alert('Error', 'Could not delete record.');
-    }
+      setRecords(prev => prev.filter(r => r.id !== id));
+      const [stats, c, t, a] = await Promise.all([getProjectStats(), getRecordCount(), getTotalRebarCount(), getAverageCount()]);
+      setProjectStats(stats); setTotalCount(c); setTotalRebars(t); setAvgCount(a);
+    } catch (e) { console.error('Failed to delete record:', e); }
   }, []);
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    fetchRecords();
-  }, [fetchRecords]);
+  const handleExport = useCallback(async () => {
+    try {
+      const csv = await exportRecordsAsCSV();
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'rebar_export.csv'; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { console.error('Export failed:', e); }
+  }, []);
 
-  const renderItem = useCallback(
-    ({ item }: { item: Record }) => (
-      <RecordCard record={item} onDelete={handleDelete} />
-    ),
-    [handleDelete]
-  );
-
-  const keyExtractor = useCallback(
-    (item: Record) => String(item.id),
-    []
-  );
-
-  if (!loading && records.length === 0) {
+  if (!loading && records.length === 0 && !isSearchActive) {
     return (
-      <View style={styles.emptyContainer}>
-        <Text style={styles.emptyIcon}>📋</Text>
-        <Text style={styles.emptyTitle}>No History Yet</Text>
-        <Text style={styles.emptySubtitle}>
-          Captured rebar counts will appear here.
-        </Text>
-      </View>
+      <div style={{
+        flex: 1, background: 'var(--bg)',
+        display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center',
+        padding: 32, animation: 'fadeIn 0.4s ease',
+      }}>
+        <div style={{ width: 72, height: 72, borderRadius: 20, background: 'var(--surface-2)', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <RebarIcon size={32} color="var(--text-3)" />
+        </div>
+        <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-1)', marginBottom: 6 }}>No History Yet</div>
+        <div style={{ fontSize: 14, color: 'var(--text-2)', textAlign: 'center', lineHeight: 1.5, maxWidth: 260 }}>Captured rebar counts will appear here with project details.</div>
+      </div>
     );
   }
 
   return (
-    <View style={styles.container}>
-      <FlatList
-        data={records}
-        keyExtractor={keyExtractor}
-        renderItem={renderItem}
-        contentContainerStyle={styles.listContent}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={Colors.accent}
-            colors={[Colors.accent]}
-          />
-        }
-        ListEmptyComponent={
-          loading ? (
-            <Text style={styles.loadingText}>Loading records…</Text>
-          ) : null
-        }
-      />
-    </View>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
+      <div style={{ padding: '12px 16px 0' }}>
+        {isSearchActive ? (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            background: 'var(--surface-2)', borderRadius: 12, padding: '0 12px', height: 44,
+          }}>
+            <SearchIcon size={18} color="var(--text-3)" />
+            <input type="text" placeholder="Search projects, notes…" className="input-field"
+              style={{ flex: 1, background: 'none', border: 'none', padding: 0, borderRadius: 0 }}
+              value={searchQuery} onChange={e => setSearchQuery(e.target.value)} autoFocus
+            />
+            <button onClick={() => { setSearchQuery(''); setIsSearchActive(false); }}
+              style={{ fontSize: 14, color: 'var(--accent)', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button onClick={() => setIsSearchActive(true)} className="icon-btn" style={{ width: 40, height: 40, background: 'var(--surface)' }}>
+              <SearchIcon size={18} color="var(--text-2)" />
+            </button>
+            <button onClick={handleExport} className="icon-btn" style={{ width: 40, height: 40, background: 'var(--surface)' }}>
+              <ExportIcon size={18} color="var(--text-2)" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {totalCount > 0 && (
+        <div style={{
+          display: 'flex', margin: '12px 16px', background: 'var(--surface)',
+          borderRadius: 14, padding: 16, border: '1px solid var(--border)',
+        }}>
+          {[{ value: totalCount, label: 'Sessions' }, { value: totalRebars, label: 'Total Rebars' }, { value: avgCount, label: 'Average' }].map((item, i, arr) => (
+            <React.Fragment key={item.label}>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <span style={{ fontSize: 22, fontWeight: 800, color: 'var(--accent)', letterSpacing: '-0.5px' }}>{item.value}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontWeight: 500 }}>{item.label}</span>
+              </div>
+              {i < arr.length - 1 && <div style={{ width: 1, background: 'var(--border)' }} />}
+            </React.Fragment>
+          ))}
+        </div>
+      )}
+
+      {projectStats.length > 0 && !searchQuery && (
+        <div style={{ display: 'flex', margin: '0 16px 8px', gap: 8, overflowX: 'auto' }}>
+          {projectStats.slice(0, 3).map(p => (
+            <div key={p.project_name} className="chip" style={{ flexShrink: 0 }}>
+              <FolderIcon size={11} color="var(--accent)" />
+              <span style={{ maxWidth: 50, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.project_name}</span>
+              <span style={{ fontWeight: 700, color: 'var(--accent)' }}>{p.total_rebars}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="screen" style={{ padding: '8px 16px 32px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {records.map(r => <RecordCard key={r.id} record={r} onDelete={handleDelete} />)}
+        {loading && <div style={{ fontSize: 14, color: 'var(--text-3)', textAlign: 'center', marginTop: 32 }}>Loading records…</div>}
+        {!loading && records.length === 0 && <div style={{ fontSize: 14, color: 'var(--text-3)', textAlign: 'center', marginTop: 32 }}>No records match your search.</div>}
+      </div>
+    </div>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
-  listContent: {
-    padding: 16,
-    paddingBottom: 32,
-  },
-  card: {
-    flexDirection: 'row',
-    backgroundColor: Colors.surface,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    alignItems: 'center',
-  },
-  cardLeft: {
-    alignItems: 'center',
-    minWidth: 60,
-  },
-  cardCount: {
-    color: Colors.accent,
-    fontSize: 36,
-    fontWeight: 'bold',
-  },
-  cardLabel: {
-    color: Colors.textSecondary,
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 1.5,
-    marginTop: 2,
-  },
-  cardDivider: {
-    width: 1,
-    backgroundColor: Colors.border,
-    marginHorizontal: 16,
-    alignSelf: 'stretch',
-  },
-  cardRight: {
-    flex: 1,
-  },
-  cardProject: {
-    color: Colors.textPrimary,
-    fontSize: 15,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  cardDate: {
-    color: Colors.textSecondary,
-    fontSize: 12,
-    marginBottom: 4,
-  },
-  cardNotes: {
-    color: Colors.textSecondary,
-    fontSize: 12,
-    fontStyle: 'italic',
-  },
-  deleteBtn: {
-    padding: 8,
-    marginLeft: 8,
-  },
-  deleteBtnText: {
-    fontSize: 18,
-  },
-  emptyContainer: {
-    flex: 1,
-    backgroundColor: Colors.background,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  emptyIcon: {
-    fontSize: 64,
-    marginBottom: 16,
-  },
-  emptyTitle: {
-    color: Colors.textPrimary,
-    fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 8,
-  },
-  emptySubtitle: {
-    color: Colors.textSecondary,
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  loadingText: {
-    color: Colors.textSecondary,
-    fontSize: 14,
-    textAlign: 'center',
-    marginTop: 40,
-  },
-});

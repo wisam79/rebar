@@ -1,273 +1,294 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ActivityIndicator,
-  Alert,
-  TouchableOpacity,
-} from 'react-native';
-import {
-  Camera,
-  useCameraDevice,
-  useCameraPermission,
-  CameraCaptureError,
-} from 'react-native-vision-camera';
-import type { Camera as CameraType } from 'react-native-vision-camera';
-import { useTensorflowModel } from 'react-native-fast-tflite';
 import { useRebarDetector } from '../hooks/useRebarDetector';
 import DetectionOverlay from '../components/DetectionOverlay';
+import IconButton from '../components/IconButton';
+import BottomSheet from '../components/BottomSheet';
+import Badge from '../components/Badge';
 import { saveRecord } from '../services/db';
-import { Colors } from '../constants/theme';
+import { useAppContext } from '../context/AppContext';
+import {
+  FlashIcon, FlashOffIcon, CaptureIcon, FolderIcon, RefreshIcon,
+} from '../constants/icons';
 
 export default function CameraScreen() {
-  const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCameraDevice('back');
-  const cameraRef = useRef<CameraType>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const [cameraReady, setCameraReady] = useState(false);
-  const [permissionGranted, setPermissionGranted] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [projectName, setProjectName] = useState('');
+  const [flash, setFlash] = useState(false);
+  const [sessionCount, setSessionCount] = useState(0);
+  const [showProjectPicker, setShowProjectPicker] = useState(false);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const [error, setError] = useState<string | null>(null);
 
-  // Load the TFLite model
-  const plugin = useTensorflowModel(require('../../assets/model.tflite'));
+  const { settings, activeProject, projects, updateSetting } = useAppContext();
+  const { detections, count, fps, modelLoading, modelReady, loadModel, detect } = useRebarDetector();
 
-  // Detector hook — provides frameProcessor, count, fps, detections
-  const { frameProcessor, detections, count, fps } =
-    useRebarDetector(plugin);
+  const countRef = useRef(count);
+  countRef.current = count;
+  const confRef = useRef(settings.confidenceThreshold);
+  confRef.current = settings.confidenceThreshold;
+  const iouRef = useRef(settings.nmsIouThreshold);
+  iouRef.current = settings.nmsIouThreshold;
+
+  useEffect(() => { loadModel(); }, [loadModel]);
+  useEffect(() => { setFlash(settings.flashEnabled); }, [settings.flashEnabled]);
 
   useEffect(() => {
-    if (hasPermission) {
-      setPermissionGranted(true);
-    } else {
-      requestPermission().then((granted) => {
-        setPermissionGranted(granted);
-        if (!granted) {
-          Alert.alert(
-            'Camera Permission Required',
-            'This app needs camera access to detect and count rebar.',
-            [{ text: 'OK', onPress: () => requestPermission() }]
-          );
-        }
-      });
-    }
-  }, [hasPermission, requestPermission]);
+    let animFrameId: number;
+    let lastDetectTime = 0;
 
-  const handleCameraReady = useCallback(() => {
-    setCameraReady(true);
+    const startCamera = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+          setCameraReady(true);
+        }
+      } catch {
+        setError('Camera access denied. Please allow camera permission and reload.');
+      }
+    };
+
+    const processFrame = async () => {
+      if (!videoRef.current || !canvasRef.current || !modelReady) {
+        animFrameId = requestAnimationFrame(processFrame);
+        return;
+      }
+      const now = Date.now();
+      if (now - lastDetectTime < 1000) {
+        animFrameId = requestAnimationFrame(processFrame);
+        return;
+      }
+      lastDetectTime = now;
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(video, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        await detect(imageData, confRef.current, iouRef.current);
+      }
+      animFrameId = requestAnimationFrame(processFrame);
+    };
+
+    startCamera();
+    animFrameId = requestAnimationFrame(processFrame);
+
+    return () => {
+      cancelAnimationFrame(animFrameId);
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    };
+  }, [modelReady, detect]);
+
+  useEffect(() => {
+    const updateSize = () => {
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        setContainerSize({ width: rect.width, height: rect.height });
+      }
+    };
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
   }, []);
 
-  /**
-   * Capture the current frame, then save the detection result to SQLite.
-   * Uses takeSnapshot for a quick capture without needing photo mode enabled.
-   */
   const handleCaptureAndSave = useCallback(async () => {
-    if (!cameraRef.current || isCapturing) return;
+    if (!videoRef.current || isCapturing) return;
     setIsCapturing(true);
-
     try {
-      // Capture snapshot
-      const snapshot = await cameraRef.current.takeSnapshot({
-        quality: 80,
-      });
-
-      // Save to database
-      await saveRecord(
-        count,
-        snapshot.path,
-        projectName || 'Default',
-        `Auto-captured at ${new Date().toLocaleTimeString()}`
-      );
-
-      Alert.alert(
-        'Saved',
-        `Count: ${count} rebars\nProject: ${projectName || 'Default'}\nSaved to history.`,
-        [{ text: 'OK' }]
-      );
+      const canvas = document.createElement('canvas');
+      canvas.width = videoRef.current.videoWidth;
+      canvas.height = videoRef.current.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.drawImage(videoRef.current, 0, 0);
+      const imageDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      await saveRecord(countRef.current, imageDataUrl, activeProject?.name ?? 'Unassigned', activeProject?.id ?? null, `Session capture at ${new Date().toLocaleTimeString()}`, settings.rebarDiameter, settings.rebarGrade);
+      setSessionCount(prev => prev + 1);
     } catch (e) {
-      const err = e as Error;
-      // Ignore "recording in progress" type errors gracefully
-      if (
-        err.message?.includes('recording') ||
-        err.message?.includes('preview')
-      ) {
-        console.warn('Snapshot skipped:', err.message);
-      } else {
-        Alert.alert('Error', `Failed to save: ${err.message}`);
-      }
+      console.error('Capture failed:', e);
     } finally {
       setIsCapturing(false);
     }
-  }, [cameraRef, isCapturing, count, projectName]);
+  }, [isCapturing, activeProject, settings]);
 
-  // --- Permission Denied State ---
-  if (!permissionGranted) {
+  const toggleFlash = useCallback(() => {
+    const next = !flash;
+    setFlash(next);
+    updateSetting('flashEnabled', next);
+    if (streamRef.current) {
+      const track = streamRef.current.getVideoTracks()[0];
+      if (track) {
+        try { track.applyConstraints({ advanced: [{ torch: next }] as any }); } catch {}
+      }
+    }
+  }, [flash, updateSetting]);
+
+  const resetSession = useCallback(() => { setSessionCount(0); }, []);
+
+  if (error) {
     return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color={Colors.accent} />
-        <Text style={styles.status}>Requesting camera permission…</Text>
-      </View>
+      <div style={{ flex: 1, background: 'var(--bg)', display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 32 }}>
+        <div style={{ fontSize: 15, color: 'var(--danger)', textAlign: 'center' }}>{error}</div>
+      </div>
     );
   }
 
-  // --- No Camera Device ---
-  if (!device) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.errorText}>No back camera device found.</Text>
-      </View>
-    );
-  }
-
-  // --- Model Loading State ---
-  if (plugin.state !== 'loaded') {
-    return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color={Colors.accent} />
-        <Text style={styles.status}>Loading model… ({plugin.state})</Text>
-      </View>
-    );
-  }
-
-  // --- Camera Active ---
   return (
-    <View style={styles.container}>
-      <Camera
-        ref={cameraRef}
-        style={StyleSheet.absoluteFill}
-        device={device}
-        isActive={true}
-        onStarted={handleCameraReady}
-        frameProcessor={frameProcessor}
-        pixelFormat="rgb"
+    <div ref={containerRef} style={{ flex: 1, background: '#000', position: 'relative', overflow: 'hidden' }}>
+      <video
+        ref={videoRef}
+        playsInline
+        muted
+        style={{
+          position: 'absolute', left: '50%', top: '50%',
+          transform: 'translate(-50%, -50%)',
+          minWidth: '100%', minHeight: '100%',
+          objectFit: 'cover',
+          width: containerSize.width, height: containerSize.height,
+        }}
       />
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+      <DetectionOverlay detections={detections} containerWidth={containerSize.width} containerHeight={containerSize.height} />
 
-      {/* Bounding Box Overlay */}
-      <DetectionOverlay detections={detections} />
+      {!cameraReady || modelLoading ? (
+        <div style={{
+          position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.8)',
+          display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: 14,
+        }}>
+          <div className="spinner" />
+          <span style={{ fontSize: 14, color: 'var(--text-2)' }}>
+            {modelLoading ? 'Loading model...' : 'Starting camera...'}
+          </span>
+        </div>
+      ) : null}
 
-      {/* HUD: Live Count */}
-      <View style={styles.hudContainer}>
-        <View style={styles.hudCard}>
-          <Text style={styles.hudLabel}>DETECTED</Text>
-          <Text style={styles.hudCount}>{count}</Text>
-          <Text style={styles.hudLabel}>REBARS</Text>
-        </View>
-        {cameraReady && (
-          <View style={styles.hudSecondary}>
-            <Text style={styles.hudFpsText}>{fps} FPS</Text>
-          </View>
-        )}
-      </View>
+      {cameraReady && (
+        <>
+          <div style={{
+            position: 'absolute', top: 0, left: 0, right: 0,
+            background: 'linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%)',
+            paddingTop: 56, paddingLeft: 16, paddingRight: 16, paddingBottom: 20,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+          }}>
+            {activeProject && (
+              <button onClick={() => setShowProjectPicker(true)} className="chip" style={{ background: 'rgba(0,0,0,0.5)', borderColor: 'transparent', color: 'var(--accent)', maxWidth: '60%' }}>
+                <FolderIcon size={14} color="var(--accent)" />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activeProject.name}</span>
+              </button>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+              <div style={{ background: 'rgba(0,0,0,0.5)', borderRadius: 8, padding: '4px 8px', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 500, color: 'var(--text-2)' }}>
+                {fps} FPS
+              </div>
+              <IconButton onPress={toggleFlash} size={40} backgroundColor={flash ? 'var(--accent-light)' : 'rgba(0,0,0,0.5)'}>
+                {flash ? <FlashIcon size={20} color="var(--accent)" /> : <FlashOffIcon size={18} color="var(--text-2)" />}
+              </IconButton>
+            </div>
+          </div>
 
-      {/* Bottom Controls */}
-      <View style={styles.bottomBar}>
-        <TouchableOpacity
-          style={[styles.captureBtn, isCapturing && styles.captureBtnDisabled]}
-          onPress={handleCaptureAndSave}
-          disabled={isCapturing}
-          activeOpacity={0.7}
+          <div style={{
+            position: 'absolute', inset: 0, display: 'flex', justifyContent: 'center', alignItems: 'center',
+            pointerEvents: 'none',
+          }}>
+            <div style={{
+              background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+              borderRadius: 20, padding: '20px 36px',
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              border: '1px solid rgba(255,255,255,0.08)',
+              animation: count > 0 ? 'countPop 0.3s ease' : 'none',
+            }}>
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: 'var(--text-3)' }}>DETECTED</span>
+              <span style={{ fontSize: 64, fontWeight: 800, letterSpacing: '-2px', color: 'var(--accent)', lineHeight: 1, margin: '4px 0' }}>{count}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: 'var(--text-3)' }}>REBARS</span>
+            </div>
+          </div>
+
+          <div style={{
+            position: 'absolute', bottom: 0, left: 0, right: 0,
+            background: 'linear-gradient(0deg, rgba(0,0,0,0.7) 0%, transparent 100%)',
+            paddingBottom: 48, paddingTop: 24, paddingLeft: 20, paddingRight: 20,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', maxWidth: 320, margin: '0 auto' }}>
+              <IconButton onPress={resetSession} size={48} backgroundColor="rgba(255,255,255,0.1)">
+                <RefreshIcon size={20} color="var(--text-1)" />
+              </IconButton>
+
+              <button
+                onClick={handleCaptureAndSave}
+                disabled={isCapturing}
+                style={{
+                  width: 72, height: 72, borderRadius: 36,
+                  background: 'var(--accent)', display: 'flex', justifyContent: 'center', alignItems: 'center',
+                  border: '4px solid rgba(255,255,255,0.25)',
+                  boxShadow: '0 0 24px rgba(var(--accent-rgb), 0.4)',
+                  cursor: isCapturing ? 'default' : 'pointer', opacity: isCapturing ? 0.5 : 1,
+                  padding: 0, transition: 'transform 0.15s ease, box-shadow 0.15s ease',
+                  transform: isCapturing ? 'scale(0.9)' : 'scale(1)',
+                }}
+              >
+                {isCapturing ? <div className="spinner spinner-sm" style={{ borderTopColor: '#fff' }} /> : <CaptureIcon size={32} color="#fff" />}
+              </button>
+
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 48 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.8px', textTransform: 'uppercase', color: 'var(--text-3)' }}>SESSION</span>
+                <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-1)' }}>{sessionCount}</span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 12 }}>
+              {settings.rebarDiameter > 0 && <Badge label={`Ø${settings.rebarDiameter}mm`} variant="accent" size="md" />}
+              {settings.rebarGrade && <Badge label={settings.rebarGrade} variant="default" size="md" />}
+            </div>
+          </div>
+        </>
+      )}
+
+      <BottomSheet visible={showProjectPicker} onClose={() => setShowProjectPicker(false)} title="Select Project">
+        {projects.map(p => (
+          <button
+            key={p.id}
+            onClick={() => { updateSetting('selectedProjectId', p.id ?? null); setShowProjectPicker(false); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 12,
+              padding: '12px 18px', width: '100%', textAlign: 'left',
+              background: p.id === settings.selectedProjectId ? 'var(--accent-light)' : 'transparent',
+              border: 'none', borderBottom: '1px solid var(--border)',
+              cursor: 'pointer', color: 'inherit', font: 'inherit',
+              transition: 'background 0.15s ease',
+            }}
+          >
+            <FolderIcon size={20} color={p.id === (settings.selectedProjectId ?? null) ? 'var(--accent)' : 'var(--text-2)'} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-1)' }}>{p.name}</div>
+              {p.location && <div style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 1 }}>{p.location}</div>}
+            </div>
+            {p.id === (settings.selectedProjectId ?? null) && <Badge label="Active" variant="accent" size="sm" />}
+          </button>
+        ))}
+        <button
+          onClick={() => { updateSetting('selectedProjectId', null); setShowProjectPicker(false); }}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 12,
+            padding: '12px 18px', width: '100%', textAlign: 'left',
+            background: 'none', border: 'none', cursor: 'pointer',
+            color: 'inherit', font: 'inherit',
+          }}
         >
-          {isCapturing ? (
-            <ActivityIndicator size="small" color={Colors.background} />
-          ) : (
-            <>
-              <Text style={styles.captureIcon}>📸</Text>
-              <Text style={styles.captureLabel}>Capture & Save</Text>
-            </>
-          )}
-        </TouchableOpacity>
-      </View>
-    </View>
+          <FolderIcon size={20} color="var(--text-3)" />
+          <span style={{ fontSize: 15, color: 'var(--text-3)' }}>No Project</span>
+        </button>
+      </BottomSheet>
+    </div>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
-  status: {
-    color: Colors.textSecondary,
-    marginTop: 16,
-    fontSize: 16,
-  },
-  errorText: {
-    color: Colors.danger,
-    fontSize: 16,
-    textAlign: 'center',
-    padding: 20,
-  },
-  hudContainer: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  hudCard: {
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    paddingHorizontal: 40,
-    paddingVertical: 24,
-    borderRadius: 16,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  hudLabel: {
-    color: Colors.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-  hudCount: {
-    color: Colors.accent,
-    fontSize: 72,
-    fontWeight: 'bold',
-    marginVertical: 4,
-  },
-  hudSecondary: {
-    marginTop: 16,
-    backgroundColor: 'rgba(30, 30, 30, 0.7)',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  hudFpsText: {
-    color: Colors.textSecondary,
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  bottomBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    paddingBottom: 32,
-    paddingTop: 16,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-  },
-  captureBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: Colors.accent,
-    paddingHorizontal: 32,
-    paddingVertical: 14,
-    borderRadius: 30,
-    minWidth: 180,
-  },
-  captureBtnDisabled: {
-    opacity: 0.5,
-  },
-  captureIcon: {
-    fontSize: 22,
-    marginRight: 8,
-  },
-  captureLabel: {
-    color: Colors.background,
-    fontSize: 16,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-});
